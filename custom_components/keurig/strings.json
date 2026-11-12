@@ -2,11 +2,17 @@
   "config": {
     "step": {
       "user": {
-        "title": "Keurig account",
-        "description": "Sign in with the Keurig app account that owns the brewer.",
+        "title": "Sign in to Keurig",
+        "description": "1. [Sign in to Keurig]({url}) in a browser with developer tools open (Network tab, *Preserve log* on).\n2. After signing in, find the request to the redirect address that contains `?code=` and copy its full URL.\n3. Paste it below within about a minute \u2014 codes are single-use and expire quickly.",
         "data": {
-          "username": "[%key:common::config_flow::data::email%]",
-          "password": "[%key:common::config_flow::data::password%]"
+          "redirect_url": "Redirect URL"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Sign in to Keurig again",
+        "description": "The Keurig session for {username} has ended.\n\n1. [Sign in to Keurig]({url}) in a browser with developer tools open (Network tab, *Preserve log* on).\n2. After signing in, find the request to the redirect address that contains `?code=` and copy its full URL.\n3. Paste it below within about a minute \u2014 codes are single-use and expire quickly.",
+        "data": {
+          "redirect_url": "Redirect URL"
         }
       },
       "devices": {
@@ -16,20 +22,23 @@
         }
       },
       "reauth_confirm": {
-        "title": "Keurig login expired",
-        "description": "Enter the password for {username} again.",
+        "title": "Sign in to Keurig again",
+        "description": "The Keurig session for {username} has ended.\n\n1. [Sign in to Keurig]({url}) in a browser with developer tools open (Network tab, *Preserve log* on).\n2. After signing in, find the request to the redirect address that contains `?code=` and copy its full URL.\n3. Paste it below within about a minute \u2014 codes are single-use and expire quickly.",
         "data": {
-          "password": "[%key:common::config_flow::data::password%]"
+          "redirect_url": "Redirect URL"
         }
       }
     },
     "error": {
-      "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
-      "unknown": "[%key:common::config_flow::error::unknown%]"
+      "invalid_redirect_url": "That URL doesn't contain a sign-in code from this attempt. Copy the full URL with ?code= from the latest sign-in.",
+      "invalid_auth": "Keurig rejected that code (it may have expired or been used). Use the link again for a fresh sign-in.",
+      "cannot_connect": "Failed to connect",
+      "unknown": "Unexpected error"
     },
     "abort": {
-      "already_configured": "[%key:common::config_flow::abort::already_configured_account%]",
-      "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]"
+      "already_configured": "This Keurig account is already configured",
+      "reauth_successful": "Re-authentication was successful",
+      "wrong_account": "You signed in with a different Keurig account than this entry uses"
     }
   }
 }

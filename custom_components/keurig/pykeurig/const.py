@@ -4,12 +4,20 @@ from enum import Enum, IntFlag
 
 # Headers
 HEADER_USER_AGENT = "K-Connect/5663 CFNetwork/1390 Darwin/22.0.0"
-#HEADER_OCP_SUBSCRIPTION_KEY = "6e2ad707ae5249089f9dbf8ed011c38c"
 HEADER_OCP_SUBSCRIPTION_KEY = "7a278473f01745d99c1b1c2692c5a110"
 
 # API Values
 API_URL = "https://iot.keurig.com/connected-platform/"
-CLIENT_ID = "cbma-v1"
+CLIENT_ID = "cbma-v1"  # legacy password-grant client, now blocked by Cloudflare
+
+# Auth0 (login.keurig.com) -- browser sign-in with PKCE, then refresh tokens.
+# Client ID and redirect URI are the ones keurig.com's own sign-in page uses;
+# redirect URI must match that client's registered value exactly.
+AUTH0_URL = "https://login.keurig.com/"
+AUTH0_CLIENT_ID = "kqRwx9GzIfhobyPbap2DvfSaWWGSNayu"
+AUTH0_REDIRECT_URI = "https://www.keurig.com/authCallBack"
+AUTH0_AUDIENCE = "customers-apis"
+AUTH0_SCOPE = "openid profile email offline_access"
 
 # Brew Temperatures
 class Size(int, Enum):

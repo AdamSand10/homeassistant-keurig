@@ -37,8 +37,9 @@ def get_brewers_by_area_id(
     device_reg: DeviceRegistry,
     entity_reg: entity_registry.EntityRegistry,
     area_ids,
-    matched_devices=[],
-):
+    matched_devices=None,
+ ):
+    matched_devices = [] if matched_devices is None else matched_devices
     for area_id in area_ids:
         devices = device_registry.async_entries_for_area(device_reg, area_id)
         device_ids = []
@@ -59,8 +60,9 @@ def get_brewers_by_area_id(
 
 
 def get_brewers_by_device_id(
-    hass: HomeAssistant, device_reg: DeviceRegistry, device_ids, matched_devices=[]
+    hass: HomeAssistant, device_reg: DeviceRegistry, device_ids, matched_devices=None
 ):
+    matched_devices = [] if matched_devices is None else matched_devices
     for device_id in device_ids:
         device_entry = device_reg.async_get(device_id)
 
@@ -76,8 +78,9 @@ def get_brewers_by_entity_id(
     device_reg: DeviceRegistry,
     entity_reg: entity_registry.EntityRegistry,
     entity_ids,
-    matched_devices=[],
+    matched_devices=None,
 ):
+    matched_devices = [] if matched_devices is None else matched_devices
     for entity_id in entity_ids:
         entity = entity_reg.async_get(entity_id)
         if entity is not None:

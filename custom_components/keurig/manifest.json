@@ -4,14 +4,9 @@
   "version": "2026.10.0",
   "config_flow": true,
   "documentation": "https://github.com/AdamSand10/homeassistant-keurig",
-  "requirements": [
-    "signalrcoreplus==0.10.3",
-    "tzlocal>=5.0"
-  ],
+  "requirements": ["signalrcoreplus==0.10.3", "tzlocal>=5.0"],
   "dependencies": [],
-  "codeowners": [
-    "@AdamSand10"
-  ],
-  "iot_class": "cloud_push",
+  "codeowners": ["@AdamSand10"],
+  "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/AdamSand10/homeassistant-keurig/issues"
 }

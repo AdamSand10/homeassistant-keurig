@@ -2,6 +2,7 @@
 
 DOMAIN = "keurig"
 MANUFACTURER = "Keurig"
+CONF_REFRESH_TOKEN = "refresh_token"
 
 SERVICE_BREW_HOT_WATER = "brew_hot_water"
 SERVICE_BREW_HOT = "brew_hot"

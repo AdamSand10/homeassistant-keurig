@@ -18,15 +18,20 @@ from homeassistant.const import (
     ATTR_ID,
     ATTR_NAME,
     ATTR_TEMPERATURE,
-    CONF_PASSWORD,
-    CONF_USERNAME,
     Platform,
 )
 from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.exceptions import (
+    ConfigEntryAuthFailed,
+    ConfigEntryNotReady,
+    HomeAssistantError,
+    ServiceValidationError,
+)
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from .pykeurig.keurigapi import KeurigApi, UnauthorizedException
 
 from .const import (
+    CONF_REFRESH_TOKEN,
     ATTR_POD_BRAND,
     ATTR_POD_VARIETY,
     ATTR_SIZE,
@@ -43,6 +48,7 @@ from .const import (
     SERVICE_UPDATE_FAVORITE,
 )
 import logging
+from datetime import timedelta
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -53,8 +59,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Keurig Connect from a config entry."""
 
     hass.data.setdefault(DOMAIN, {})
-    client = KeurigApi()
-    await client.login(entry.data.get(CONF_USERNAME), entry.data.get(CONF_PASSWORD))
+    refresh_token = entry.data.get(CONF_REFRESH_TOKEN)
+    if not refresh_token:
+        # Entries from the old password login have no refresh token
+        raise ConfigEntryAuthFailed("Sign in to Keurig again (password login was retired)")
+
+    def _save_refresh_token(new_token: str) -> None:
+        # Auth0 rotates refresh tokens; the previous one is dead once replaced
+        hass.config_entries.async_update_entry(
+            entry, data={**entry.data, CONF_REFRESH_TOKEN: new_token}
+        )
+
+    client = KeurigApi(
+        refresh_token=refresh_token, token_update_callback=_save_refresh_token
+    )
+    try:
+        await client.async_ensure_token()
+    except UnauthorizedException as err:
+        raise ConfigEntryAuthFailed("Keurig session expired; sign in again") from err
+    except Exception as err:
+        # Network / 5xx / Cloudflare: let HA retry setup with its own backoff
+        raise ConfigEntryNotReady(f"Keurig authentication failed: {err}") from err
 
     coordinator = KeurigCoordinator(hass, client, entry)
 
@@ -63,194 +88,108 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     await coordinator.async_config_entry_first_refresh()
 
-    async def handle_brew_hot_water(call: ServiceCall):
-        device_ids = call.data.get(ATTR_DEVICE_ID)
-        area_ids = call.data.get(ATTR_AREA_ID)
-        entity_ids = call.data.get(ATTR_ENTITY_ID)
-        size = call.data.get(ATTR_SIZE)
-        temperature = call.data.get(ATTR_TEMPERATURE)
-        matched_devices = get_brewers_for_service(
-            hass, area_ids, device_ids, entity_ids
+    async def _target_devices(call: ServiceCall):
+        """Resolve the brewers targeted by a service call."""
+        matched = get_brewers_for_service(
+            hass,
+            call.data.get(ATTR_AREA_ID),
+            call.data.get(ATTR_DEVICE_ID),
+            call.data.get(ATTR_ENTITY_ID),
         )
-        for device_id in matched_devices:
-            device = next(
-                (dev for dev in await coordinator.get_devices() if dev.id == device_id)
-            )
-            try:
-                await device.hot_water(int(size), int(temperature))
-            except UnauthorizedException:
-                await entry.async_start_reauth(hass)
+        devices = [d for d in (await coordinator.get_devices() or []) if d.id in matched]
+        if not devices:
+            raise ServiceValidationError("No Keurig brewer matched the service target")
+        return devices
 
-    hass.services.async_register(DOMAIN, SERVICE_BREW_HOT_WATER, handle_brew_hot_water)
+    async def _run(action, *, check_result=False):
+        """Run an API call, handling reauth and surfacing refusals."""
+        try:
+            result = await action()
+        except UnauthorizedException:
+            entry.async_start_reauth(hass)
+            raise HomeAssistantError("Keurig authorization failed; reauth started")
+        except HTTPStatusError as err:
+            raise HomeAssistantError(
+                f"Keurig API error {err.response.status_code}: {err.response.text}"
+            ) from err
+        return result
+
+    def _refused(device):
+        return HomeAssistantError(
+            f"{device.name} not ready to brew "
+            f"(brewer={device.brewer_status}, pod={device.pod_status}, "
+            f"errors={device.errors})"
+        )
+    async def _brew(call: ServiceCall, method):
+        for device in await _target_devices(call):
+            # pykeurig returns False when the pre-brew status check fails
+            if await _run(lambda d=device: method(d)) is False:
+                raise _refused(device)
+        await coordinator.async_request_refresh()
+
+    async def handle_brew_hot_water(call: ServiceCall):
+        size, temp = int(call.data[ATTR_SIZE]), int(call.data[ATTR_TEMPERATURE])
+        await _brew(call, lambda d: d.hot_water(size, temp))
 
     async def handle_brew_hot(call: ServiceCall):
-        device_ids = call.data.get(ATTR_DEVICE_ID)
-        area_ids = call.data.get(ATTR_AREA_ID)
-        entity_ids = call.data.get(ATTR_ENTITY_ID)
-        size = call.data.get(ATTR_SIZE)
-        temperature = call.data.get(ATTR_TEMPERATURE)
-        intensity = call.data.get(ATTR_INTENSITY)
-        matched_devices = get_brewers_for_service(
-            hass, area_ids, device_ids, entity_ids
-        )
-        for device_id in matched_devices:
-            device = next(
-                (dev for dev in await coordinator.get_devices() if dev.id == device_id)
-            )
-            try:
-                await device.brew_hot(int(size), int(temperature), int(intensity))
-            except UnauthorizedException:
-                await entry.async_start_reauth(hass)
-
-    hass.services.async_register(DOMAIN, SERVICE_BREW_HOT, handle_brew_hot)
+        size, temp = int(call.data[ATTR_SIZE]), int(call.data[ATTR_TEMPERATURE])
+        intensity = int(call.data[ATTR_INTENSITY])
+        await _brew(call, lambda d: d.brew_hot(size, temp, intensity))
 
     async def handle_brew_iced(call: ServiceCall):
-        device_ids = call.data.get(ATTR_DEVICE_ID)
-        area_ids = call.data.get(ATTR_AREA_ID)
-        entity_ids = call.data.get(ATTR_ENTITY_ID)
-        matched_devices = get_brewers_for_service(
-            hass, area_ids, device_ids, entity_ids
-        )
-        for device_id in matched_devices:
-            device = next(
-                (dev for dev in await coordinator.get_devices() if dev.id == device_id)
-            )
-            try:
-                await device.brew_iced()
-            except UnauthorizedException:
-                await entry.async_start_reauth(hass)
-
-    hass.services.async_register(DOMAIN, SERVICE_BREW_ICED, handle_brew_iced)
+        await _brew(call, lambda d: d.brew_iced())
 
     async def handle_brew_recommendation(call: ServiceCall):
-        device_ids = call.data.get(ATTR_DEVICE_ID)
-        area_ids = call.data.get(ATTR_AREA_ID)
-        entity_ids = call.data.get(ATTR_ENTITY_ID)
-        size = call.data.get(ATTR_SIZE)
-        matched_devices = get_brewers_for_service(
-            hass, area_ids, device_ids, entity_ids
-        )
-        for device_id in matched_devices:
-            device = next(
-                (dev for dev in await coordinator.get_devices() if dev.id == device_id)
-            )
-            try:
-                await device.brew_recommendation(int(size))
-            except UnauthorizedException:
-                await entry.async_start_reauth(hass)
-
-    hass.services.async_register(
-        DOMAIN, SERVICE_BREW_RECOMMENDATION, handle_brew_recommendation
-    )
+        size = int(call.data[ATTR_SIZE])
+        await _brew(call, lambda d: d.brew_recommendation(size))
 
     async def handle_brew_favorite(call: ServiceCall):
-        device_ids = call.data.get(ATTR_DEVICE_ID)
-        area_ids = call.data.get(ATTR_AREA_ID)
-        entity_ids = call.data.get(ATTR_ENTITY_ID)
-        favorite_id = call.data.get(ATTR_ID)
-        matched_devices = get_brewers_for_service(
-            hass, area_ids, device_ids, entity_ids
-        )
-        for device_id in matched_devices:
-            device = next(
-                (dev for dev in await coordinator.get_devices() if dev.id == device_id)
-            )
-            try:
-                await device.brew_favorite(favorite_id)
-            except UnauthorizedException:
-                await entry.async_start_reauth(hass)
-
-    hass.services.async_register(DOMAIN, SERVICE_BREW_FAVORITE, handle_brew_favorite)
+        favorite_id = call.data[ATTR_ID]
+        await _brew(call, lambda d: d.brew_favorite(favorite_id))
 
     async def handle_cancel_brew(call: ServiceCall):
-        device_ids = call.data.get(ATTR_DEVICE_ID)
-        area_ids = call.data.get(ATTR_AREA_ID)
-        entity_ids = call.data.get(ATTR_ENTITY_ID)
-        matched_devices = get_brewers_for_service(
-            hass, area_ids, device_ids, entity_ids
-        )
-        for device_id in matched_devices:
-            device = next(
-                (dev for dev in await coordinator.get_devices() if dev.id == device_id)
-            )
-            try:
-                await device.cancel_brew()
-            except UnauthorizedException:
-                await entry.async_start_reauth(hass)
-
-    hass.services.async_register(DOMAIN, SERVICE_CANCEL_BREW, handle_cancel_brew)
+        for device in await _target_devices(call):
+            if await _run(device.cancel_brew) is False:
+                raise HomeAssistantError(f"Cancel brew failed for {device.name}")
+        await coordinator.async_request_refresh()
+ 
+    # Favorites belong to the Keurig account, not a specific brewer
 
     async def handle_add_favorite(call: ServiceCall):
-        device_ids = call.data.get(ATTR_DEVICE_ID)
-        area_ids = call.data.get(ATTR_AREA_ID)
-        entity_ids = call.data.get(ATTR_ENTITY_ID)
-        name = call.data.get(ATTR_NAME)
-        size = call.data.get(ATTR_SIZE)
-        temperature = call.data.get(ATTR_TEMPERATURE)
-        intensity = call.data.get(ATTR_INTENSITY)
-        matched_devices = get_brewers_for_service(
-            hass, area_ids, device_ids, entity_ids
-        )
-        for device_id in matched_devices:
-            device = next(
-                (dev for dev in await coordinator.get_devices() if dev.id == device_id)
+        await _run(
+            lambda: client.async_add_favorite(
+                call.data[ATTR_NAME],
+                int(call.data[ATTR_SIZE]),
+                int(call.data[ATTR_TEMPERATURE]),
+                int(call.data[ATTR_INTENSITY]),
             )
-            try:
-                await device.add_favorite(
-                    name, int(size), int(temperature), int(intensity)
-                )
-            except UnauthorizedException:
-                await entry.async_start_reauth(hass)
-
-    hass.services.async_register(DOMAIN, SERVICE_ADD_FAVORITE, handle_add_favorite)
+        )
 
     async def handle_update_favorite(call: ServiceCall):
-        device_ids = call.data.get(ATTR_DEVICE_ID)
-        area_ids = call.data.get(ATTR_AREA_ID)
-        entity_ids = call.data.get(ATTR_ENTITY_ID)
-        favorite_id = call.data.get(ATTR_ID)
-        name = call.data.get(ATTR_NAME)
-        size = call.data.get(ATTR_SIZE)
-        temperature = call.data.get(ATTR_TEMPERATURE)
-        intensity = call.data.get(ATTR_INTENSITY)
-        matched_devices = get_brewers_for_service(
-            hass, area_ids, device_ids, entity_ids
-        )
-        for device_id in matched_devices:
-            device = next(
-                (dev for dev in await coordinator.get_devices() if dev.id == device_id)
+        await _run(
+            lambda: client.async_update_favorite(
+                call.data[ATTR_ID],
+                call.data[ATTR_NAME],
+                int(call.data[ATTR_SIZE]),
+                int(call.data[ATTR_TEMPERATURE]),
+                int(call.data[ATTR_INTENSITY]),
             )
-            try:
-                await device.update_favorite(
-                    favorite_id, name, int(size), int(temperature), int(intensity)
-                )
-            except UnauthorizedException:
-                await entry.async_start_reauth(hass)
-
-    hass.services.async_register(
-        DOMAIN, SERVICE_UPDATE_FAVORITE, handle_update_favorite
-    )
-
+        )
     async def handle_delete_favorite(call: ServiceCall):
-        device_ids = call.data.get(ATTR_DEVICE_ID)
-        area_ids = call.data.get(ATTR_AREA_ID)
-        entity_ids = call.data.get(ATTR_ENTITY_ID)
-        favorite_id = call.data.get(ATTR_ID)
-        matched_devices = get_brewers_for_service(
-            hass, area_ids, device_ids, entity_ids
-        )
-        for device_id in matched_devices:
-            device = next(
-                (dev for dev in await coordinator.get_devices() if dev.id == device_id)
-            )
-            try:
-                await device.delete_favorite(favorite_id)
-            except UnauthorizedException:
-                await entry.async_start_reauth(hass)
+        await _run(lambda: client.async_delete_favorite(call.data[ATTR_ID]))
 
-    hass.services.async_register(
-        DOMAIN, SERVICE_DELETE_FAVORITE, handle_delete_favorite
-    )
+    for name, handler in (
+        (SERVICE_BREW_HOT_WATER, handle_brew_hot_water),
+        (SERVICE_BREW_HOT, handle_brew_hot),
+        (SERVICE_BREW_ICED, handle_brew_iced),
+        (SERVICE_BREW_RECOMMENDATION, handle_brew_recommendation),
+        (SERVICE_BREW_FAVORITE, handle_brew_favorite),
+        (SERVICE_CANCEL_BREW, handle_cancel_brew),
+        (SERVICE_ADD_FAVORITE, handle_add_favorite),
+        (SERVICE_UPDATE_FAVORITE, handle_update_favorite),
+        (SERVICE_DELETE_FAVORITE, handle_delete_favorite),
+    ):
+        hass.services.async_register(DOMAIN, name, handler)
 
     # Views can only be registered once per HA run; reloading the entry must not re-register them.
     if not hass.data.get(f"{DOMAIN}_views_registered"):
@@ -273,19 +212,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 class KeurigCoordinator(DataUpdateCoordinator):
     """My custom coordinator."""
 
-    def __init__(
-        self, hass: HomeAssistant, api: KeurigApi, entry: ConfigEntry, devices=None
-    ):
+    def __init__(self, hass, api, entry, devices=None):
         """Initialize my coordinator."""
         super().__init__(
-            hass,
-            _LOGGER,
-            config_entry=entry,
-            # Name of the data. For logging purposes.
-            name="Keurig",
+            hass, _LOGGER, name="Keurig", config_entry=entry,
+            update_interval=timedelta(seconds=60),
         )
         self.api = api
-        self.hass: HomeAssistant = hass
+        self.hass = hass
         self.entry = entry
         self._devices = None
         self._device_lock = asyncio.Lock()
@@ -296,11 +230,21 @@ class KeurigCoordinator(DataUpdateCoordinator):
                 try:
                     self._devices = await self.api.async_get_devices()
                 except UnauthorizedException:
-                    await self.entry.async_start_reauth(self.hass)
+                    self.entry.async_start_reauth(self.hass)
             return self._devices
 
     async def _async_update_data(self):
-        await self.hass.async_add_executor_job(self.api.connect)
+        # Push (SignalR) is intentionally not used: polling is enough, and its
+        # background thread refreshed tokens concurrently with this coordinator.
+        try:
+            await self.api.async_ensure_token()
+        except UnauthorizedException as err:
+            raise ConfigEntryAuthFailed("Keurig rejected the stored credentials") from err
+        except Exception as err:
+            raise UpdateFailed(f"Keurig authentication unavailable: {err}") from err
+
+        for device in await self.get_devices() or []:
+            await device.async_update()
 
 
 class KeurigView(HomeAssistantView):
