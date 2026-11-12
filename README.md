@@ -13,7 +13,19 @@ The original integration by [@dcmeglio](https://github.com/dcmeglio) stopped ins
 
 1. HACS → ⋮ → Custom repositories → add `https://github.com/AdamSand10/homeassistant-keurig` as **Integration**.
 2. Download **Keurig Connect**, restart Home Assistant.
-3. Settings → Devices & Services → Add Integration → **Keurig Connect**, sign in with the Keurig app account.
+3. Settings → Devices & Services → Add Integration → **Keurig Connect**, then follow the sign-in steps below.
+
+## Signing in
+
+Keurig no longer accepts username/password logins from third-party clients (the old token endpoint is blocked by Cloudflare, and Auth0 bot detection rejects password grants). Sign-in is now done once in a browser:
+
+1. Open your browser's developer tools on the **Network** tab and enable **Preserve log**.
+2. Click the **Sign in to Keurig** link in the setup dialog and sign in normally (including any CAPTCHA).
+3. Find the request to the keurig.com redirect address that contains `?code=`, copy its full URL, and paste it into the dialog within about a minute.
+
+After that the integration runs unattended on rotating refresh tokens, saved to the config entry. If the session ever ends, Home Assistant asks you to repeat the sign-in. Existing installs are prompted to re-authenticate once after updating; the stored password is removed when they do.
+
+Status is polled every 60 seconds (real-time push is disabled).
 
 ## Entities
 

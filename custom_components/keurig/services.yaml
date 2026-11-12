@@ -14,11 +14,11 @@ brew_hot_water:
       selector:
         select:
           options:
-            - 4
-            - 6
-            - 8
-            - 10
-            - 12
+            - "4"
+            - "6"
+            - "8"
+            - "10"
+            - "12"
     temperature:
       name: Temperature
       description: The temperature of the hot water
@@ -27,17 +27,17 @@ brew_hot_water:
         select:
           options:
             - label: warm
-              value: 187
+              value: "187"
             - label: warmer
-              value: 191
+              value: "191"
             - label: hot
-              value: 194
+              value: "194"
             - label: hotter
-              value: 197
+              value: "197"
             - label: xhot
-              value: 200
+              value: "200"
             - label: maxhot
-              value: 204
+              value: "204"
 
 brew_hot:
   name: Brew hot drink
@@ -55,11 +55,11 @@ brew_hot:
       selector:
         select:
           options:
-            - 4
-            - 6
-            - 8
-            - 10
-            - 12
+            - "4"
+            - "6"
+            - "8"
+            - "10"
+            - "12"
     temperature:
       name: Temperature
       description: The temperature of the hot water
@@ -68,17 +68,17 @@ brew_hot:
         select:
           options:
             - label: Warm
-              value: 187
+              value: "187"
             - label: Warmer
-              value: 191
+              value: "191"
             - label: Hot
-              value: 194
+              value: "194"
             - label: Hotter
-              value: 197
+              value: "197"
             - label: Extra Hot
-              value: 200
+              value: "200"
             - label: Maximum Hot
-              value: 204
+              value: "204"
     intensity:
       name: Intensity
       description: The intensity (flow rate) of the drink
@@ -87,15 +87,15 @@ brew_hot:
         select:
           options:
             - label: Balanced
-              value: 4435
+              value: "4435"
             - label: Rich
-              value: 3942
+              value: "3942"
             - label: Robust
-              value: 3449
+              value: "3449"
             - label: Strong
-              value: 2957
+              value: "2957"
             - label: Intense
-              vale: 2464
+              value: "2464"
 
 brew_iced:
   name: Brew iced drink
@@ -122,11 +122,11 @@ brew_recommendation:
       selector:
         select:
           options:
-            - 4
-            - 6
-            - 8
-            - 10
-            - 12
+            - "4"
+            - "6"
+            - "8"
+            - "10"
+            - "12"
 
 brew_favorite:
   name: Brew favorite
@@ -175,11 +175,11 @@ add_favorite:
       selector:
         select:
           options:
-            - 4
-            - 6
-            - 8
-            - 10
-            - 12
+            - "4"
+            - "6"
+            - "8"
+            - "10"
+            - "12"
     temperature:
       name: Temperature
       description: The temperature of the hot water
@@ -188,17 +188,17 @@ add_favorite:
         select:
           options:
             - label: Warm
-              value: 187
+              value: "187"
             - label: Warmer
-              value: 191
+              value: "191"
             - label: Hot
-              value: 194
+              value: "194"
             - label: Hotter
-              value: 197
+              value: "197"
             - label: Extra Hot
-              value: 200
+              value: "200"
             - label: Maximum Hot
-              value: 204
+              value: "204"
     intensity:
       name: Intensity
       description: The intensity (flow rate) of the drink
@@ -207,15 +207,15 @@ add_favorite:
         select:
           options:
             - label: Balanced
-              value: 4435
+              value: "4435"
             - label: Rich
-              value: 3942
+              value: "3942"
             - label: Robust
-              value: 3449
+              value: "3449"
             - label: Strong
-              value: 2957
+              value: "2957"
             - label: Intense
-              vale: 2464
+              value: "2464"
 
 update_favorite:
   name: Update favorite
@@ -245,11 +245,11 @@ update_favorite:
       selector:
         select:
           options:
-            - 4
-            - 6
-            - 8
-            - 10
-            - 12
+            - "4"
+            - "6"
+            - "8"
+            - "10"
+            - "12"
     temperature:
       name: Temperature
       description: The temperature of the hot water
@@ -258,17 +258,17 @@ update_favorite:
         select:
           options:
             - label: Warm
-              value: 187
+              value: "187"
             - label: Warmer
-              value: 191
+              value: "191"
             - label: Hot
-              value: 194
+              value: "194"
             - label: Hotter
-              value: 197
+              value: "197"
             - label: Extra Hot
-              value: 200
+              value: "200"
             - label: Maximum Hot
-              value: 204
+              value: "204"
     intensity:
       name: Intensity
       description: The intensity (flow rate) of the drink
@@ -277,15 +277,15 @@ update_favorite:
         select:
           options:
             - label: Balanced
-              value: 4435
+              value: "4435"
             - label: Rich
-              value: 3942
+              value: "3942"
             - label: Robust
-              value: 3449
+              value: "3449"
             - label: Strong
-              value: 2957
+              value: "2957"
             - label: Intense
-              vale: 2464
+              value: "2464"
 
 delete_favorite:
   name: Delete favorite

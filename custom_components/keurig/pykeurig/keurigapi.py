@@ -1,10 +1,15 @@
 """Provides access to the Keurig SMART APIs."""
 # pylint: disable=protected-access, broad-except, too-many-lines
 import asyncio
+import base64
+import hashlib
+import secrets
+import urllib.parse
 import json
+import re
 import logging
 import time
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 import uuid
 import requests
 from tzlocal import get_localzone
@@ -16,6 +21,11 @@ from signalrcoreplus.hub_connection_builder import HubConnectionBuilder
 
 from .const import (
     API_URL,
+    AUTH0_AUDIENCE,
+    AUTH0_CLIENT_ID,
+    AUTH0_REDIRECT_URI,
+    AUTH0_SCOPE,
+    AUTH0_URL,
     BREW_COFFEE,
     BREW_HOT_WATER,
     BREW_OVER_ICE,
@@ -50,10 +60,16 @@ class KeurigApi:
 
     MAX_RECONNECT_DELAY: int = 240
 
-    def __init__(self, timeout: int = 10, locale: str = "us", language: str = "en"):
+    def __init__(
+        self,
+        timeout: int = 10,
+        locale: str = "us",
+        language: str = "en",
+        refresh_token: Optional[str] = None,
+        token_update_callback: Optional[Callable[[str], None]] = None,
+    ):
         self._access_token = None
         self._token_expires_at = None
-        self._refresh_token = None
         self._customer_id = None
         self._timeout = timeout
         self.locale = locale
@@ -64,39 +80,102 @@ class KeurigApi:
         self._signalr_connection = None
         self._reconnect_count = 0
         self._disconnecting = False
-        self._email = None
-        self._password = None
+        self._refresh_token = refresh_token
+        self._token_update_callback = token_update_callback
         self._refresh_lock = asyncio.Lock()
         self._auth_failures = 0
         self._auth_retry_at = 0.0
 
     async def async_login(self, email: str, password: str):
         """Log in with a password grant.
-
-        Raises UnauthorizedException if Keurig rejects the credentials and
-        httpx errors for anything else (network, 5xx).
         """
-        self._email = email
-        self._password = password
-        await self._async_token_request(
+         # ---- Authentication (Auth0 authorization code + PKCE, then refresh tokens)
+    @property
+    def refresh_token(self) -> Optional[str]:
+        """The current refresh token; persist this, it rotates on every refresh."""
+        return self._refresh_token
+
+    @staticmethod
+    def create_authorization_request() -> dict:
+        """Start a browser sign-in.
+
+        Returns {"url", "code_verifier", "state"}. Send the user to "url";
+        keep code_verifier and state for async_complete_authorization.
+         """
+        if "REPLACE_WITH" in AUTH0_CLIENT_ID + AUTH0_REDIRECT_URI:
+            raise RuntimeError("Set AUTH0_CLIENT_ID and AUTH0_REDIRECT_URI in pykeurig/const.py")
+        verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode()
+        challenge = (
+            base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
+            .rstrip(b"=")
+            .decode()
+        )
+        state = secrets.token_urlsafe(16)
+        url = f"{AUTH0_URL}authorize?" + urllib.parse.urlencode(
             {
-                "grant_type": "password",
-                "client_id": CLIENT_ID,
-                "username": email,
-                "password": password,
+                "response_type": "code",
+                "client_id": AUTH0_CLIENT_ID,
+                "redirect_uri": AUTH0_REDIRECT_URI,
+                "audience": AUTH0_AUDIENCE,
+                "scope": AUTH0_SCOPE,
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+                "state": state,
             }
         )
+        return {"url": url, "code_verifier": verifier, "state": state}
+
+    async def async_complete_authorization(
+        self, redirect_url: str, code_verifier: str, state: str
+    ) -> dict:
+        """Finish a browser sign-in from the URL the browser was redirected to.
+
+        Raises ValueError for a URL that isn't from this sign-in,
+        UnauthorizedException if Keurig rejects the code. Returns the
+        (unverified) ID token claims, e.g. "sub" and "email".
+        """
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(redirect_url.strip()).query)
+        if "error" in query:
+            raise UnauthorizedException(
+                f"{query['error'][0]}: {query.get('error_description', [''])[0]}"
+            )
+        if "code" not in query:
+            raise ValueError("No authorization code in that URL")
+        if query.get("state", [None])[0] != state:
+            raise ValueError("That URL is from a different sign-in attempt")
+
+        json_result = await self._async_token_request(
+            {
+                "grant_type": "authorization_code",
+                "client_id": AUTH0_CLIENT_ID,
+                "code": query["code"][0],
+                "code_verifier": code_verifier,
+                "redirect_uri": AUTH0_REDIRECT_URI,
+            }
+        )
+        return self._decode_jwt_claims(json_result.get("id_token"))
+
+    @staticmethod
+    def _decode_jwt_claims(token: Optional[str]) -> dict:
+        """Read a JWT's claims without verifying it (display/identity use only)."""
+        if not token:
+            return {}
+        try:
+            payload = token.split(".")[1]
+            return json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        except Exception:
+            return {}
 
     async def async_ensure_token(self):
-        """Make sure a valid access token is held, refreshing or logging in if needed."""
+        """Make sure a valid access token is held, refreshing if needed."""
         if self._access_token is None or (
             self._token_expires_at is not None and self._token_expires_at <= time.time()
         ):
             if not await self._async_refresh_token():
                 raise UnauthorizedException()
 
-    async def _async_token_request(self, data: dict):
-        """POST to the OAuth token endpoint and store the resulting tokens."""
+    async def _async_token_request(self, data: dict) -> dict:
+        """POST to the Auth0 token endpoint and store the resulting tokens."""
         client = httpx.AsyncClient()
         try:
             # Never send the (possibly expired) bearer token to the token endpoint
@@ -104,39 +183,54 @@ class KeurigApi:
                 {"Accept-Encoding": "identity"}, auth=False
             )
             res = await client.post(
-                f"{API_URL}api/claa/v1/oauth/token", json=data, timeout=self._timeout
+                f"{AUTH0_URL}oauth/token",
+                json=data,
+                headers={"Content-Type": "application/json"},
+                timeout=self._timeout,
             )
         finally:
             await client.aclose()
 
+        _raise_if_cloudflare_block(res)
         if res.status_code in (400, 401, 403):
+            # invalid_grant (revoked/expired refresh token or used code),
+            # requires_verification (bot detection), etc. -> needs a new sign-in            
             _LOGGER.warning(
                 "Keurig %s grant rejected: %s %s",
                 data["grant_type"], res.status_code, res.text[:500],
             )
-            raise UnauthorizedException()
+            raise UnauthorizedException(res.text[:200])
         if res.is_error:
             _LOGGER.error(
                 "Keurig %s grant failed: %s %s",
                 data["grant_type"], res.status_code, res.text[:500],
             )
         res.raise_for_status()
-        self.__store_tokens(res.json())
+        json_result = res.json()
+        self.__store_tokens(json_result)
+        return json_result
 
     def __store_tokens(self, json_result: dict):
         self._access_token = json_result["access_token"]
         self._token_expires_at = time.time() + json_result["expires_in"] - 120
-        # Some grants don't rotate the refresh token; keep the old one if absent
-        self._refresh_token = json_result.get("refresh_token", self._refresh_token)
+        new_refresh = json_result.get("refresh_token")
+        if new_refresh and new_refresh != self._refresh_token:
+            # Auth0 rotates refresh tokens: the old one stops working, so the
+            # caller must persist the new one or a restart loses the session.
+            self._refresh_token = new_refresh
+            if self._token_update_callback is not None:
+                try:
+                    self._token_update_callback(new_refresh)
+                except Exception as err:
+                    _LOGGER.error("Token update callback failed: %s", err)
 
     async def login(self, email: str, password: str):
-        """Logs you into the Keurig API. Returns False on any failure."""
-        try:
-            await self.async_login(email, password)
-        except Exception as ex:
-            _LOGGER.error("Keurig login failed: %s", ex)
-            return False
-        return True
+        """Password login is no longer accepted by Keurig (bot detection)."""
+        _LOGGER.error(
+            "Keurig password login is no longer supported; use "
+            "create_authorization_request / async_complete_authorization"
+        )
+        return False
 
     async def async_get_customer(self):
         """Retrieves the customer information associated with the username logged into the API"""
@@ -582,85 +676,52 @@ class KeurigApi:
         return res
 
     async def _async_refresh_token(self):
-        """Get a new access token: refresh grant first, then full login.
+        """Get a new access token with the refresh token.
 
-        Returns False only when Keurig rejects the stored credentials.
-        Raises on network/server errors, and backs off after repeated failures
-        so a Keurig outage doesn't turn into hundreds of login attempts.
+        Returns False when there is no usable refresh token (a new browser
+        sign-in is needed). Raises on network/server errors, backing off after
+        repeated failures so an outage doesn't hammer Keurig.
         """
         stale_token = self._access_token
         async with self._refresh_lock:
             if self._access_token is not None and self._access_token != stale_token:
                 return True  # another caller refreshed while we waited
+            
+            if self._refresh_token is None:
+                return False
 
             if time.time() < self._auth_retry_at:
                 raise ConnectionError(
                     f"Keurig auth backing off for {int(self._auth_retry_at - time.time())}s"
                 )
 
-            if self._refresh_token is not None:
-                try:
-                    await self._async_token_request(
-                        {
-                            "grant_type": "refresh_token",
-                            "client_id": CLIENT_ID,
-                            "refresh_token": self._refresh_token,
-                        }
-                    )
-                    self._auth_failures = 0
-                    return True
-                except Exception as err:
-                    _LOGGER.warning("Token refresh failed (%s); trying full login", err)
-                    self._refresh_token = None
-
-            if self._email is None or self._password is None:
-                return False
 
             try:
-                await self.async_login(self._email, self._password)
+                # Attempt to refresh the token
+                await self._async_token_request(
+                    {
+                        "grant_type": "refresh_token",
+                        "client_id": AUTH0_CLIENT_ID,
+                        "refresh_token": self._refresh_token,
+                    }
+                )
             except UnauthorizedException:
+                # Revoked, expired, or already rotated away: only a new sign-in helps
+                self._refresh_token = None                
                 return False
             except Exception:
                 self._auth_failures += 1
                 delay = min(60 * 2 ** (self._auth_failures - 1), 3600)
                 self._auth_retry_at = time.time() + delay
-                _LOGGER.error("Keurig login failed; next attempt in %ss", delay)
+                _LOGGER.error("Keurig token refresh failed; next attempt in %ss", delay)
                 raise
             self._auth_failures = 0
             return True
 
     def _get_refresh_token(self):
-        """Retrieve a new access token synchronously using a refresh_token"""
-
-        data = {
-            "grant_type": "refresh_token",
-            "client_id": CLIENT_ID,
-            "refresh_token": self._refresh_token,
-        }
-
-        client = httpx.Client()
-        try:
-            client.headers = self._get_headers(
-                {"Accept-Encoding": "identity"}, auth=False
-            )
-
-            endpoint = f"{API_URL}api/claa/v1/oauth/token"
-            res = client.post(endpoint, json=data, timeout=self._timeout)
-            if res.status_code in (400, 401, 403):
-                return False
-            res.raise_for_status()
-
-            json_result = res.json()
-            self._access_token = json_result["access_token"]
-            self._token_expires_at = time.time() + json_result["expires_in"] - 120
-            self._refresh_token = json_result["refresh_token"]
-        except Exception as err:
-            _LOGGER.error("Error refreshing access token: %s", err)
-            raise err
-        finally:
-            client.close()
-
-        return True
+        """Synchronous refresh (SignalR thread only). Not supported with Auth0."""
+        _LOGGER.error("Synchronous token refresh is not supported; push updates are disabled")
+        return False
 
 
 class KeurigDevice:
@@ -1272,6 +1333,34 @@ class KeurigDevice:
                 self._pod_is_iced
             ) = self._pod_is_flavored = self._pod_is_powdered = None
 
+class KeurigBlockedError(ConnectionError):
+    """Cloudflare blocked the request before it reached Keurig's API.
+
+    Not an authentication failure: retrying with the same credentials is fine
+    once whatever Cloudflare objected to (client fingerprint, IP) is resolved.
+    """
+
+
+def _raise_if_cloudflare_block(res: httpx.Response):
+    """Raise KeurigBlockedError if the response is a Cloudflare block page."""
+    if res.status_code not in (403, 429, 503):
+        return
+    is_html = "text/html" in res.headers.get("content-type", "")
+    if not (res.headers.get("cf-mitigated") or (is_html and "cloudflare" in res.text.lower())):
+        return
+    code = re.search(r"cf-error-code[^>]*>\s*(\d+)", res.text) or re.search(
+        r"Error(?: code)?:?\s*(\d{4})", res.text
+    )
+    ray = res.headers.get("cf-ray") or (
+        m.group(1) if (m := re.search(r"Ray ID:\s*(?:<[^>]+>)?\s*([0-9a-f]+)", res.text)) else None
+    )
+    msg = (
+        f"Cloudflare blocked the Keurig request (HTTP {res.status_code}, "
+        f"error {code.group(1) if code else 'unknown'}, ray {ray or 'unknown'}, "
+        f"user-agent {res.request.headers.get('user-agent')!r})"
+    )
+    _LOGGER.error(msg)
+    raise KeurigBlockedError(msg)
 
 class UnauthorizedException(Exception):
     """Exception thrown when the user is unauthorized to call the api."""
